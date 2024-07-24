@@ -6,7 +6,7 @@ import (
     "your_project/config"
     "your_project/network"
     "your_project/plugin"
-    "your_project/web" // 새로 추가할 웹 서버 패키지
+    "your_project/web"
 )
 
 func main() {
@@ -45,8 +45,8 @@ func main() {
 
     // 웹 관리 인터페이스 활성화 (명령줄 인자로 지정된 경우)
     if *enableWebAdmin {
+        webServer := web.NewWebServer(cfg, server, *webAdminPort)
         go func() {
-            webServer := web.NewWebServer(cfg, *webAdminPort)
             if err := webServer.Start(); err != nil {
                 log.Fatalf("Web admin interface failed to start: %v", err)
             }

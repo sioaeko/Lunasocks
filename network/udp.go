@@ -1,81 +1,111 @@
-package network
+package server
 
 import (
+    "encoding/binary"
+    "fmt"
+    "log"
     "net"
+    "time"
 
-    "lunasocks/internal/protocol"
-    "lunasocks/internal/logging"
+    "your_project/crypto"
+    "your_project/socks"
 )
 
-func StartUDPServer(addr string, ss *protocol.Shadowsocks) error {
-    conn, err := net.ListenPacket("udp", addr)
+type UDPConn struct {
+    conn     *net.UDPConn
+    cipher   *crypto.Cipher
+    timeout  time.Duration
+    clientID string
+}
+
+func (s *Server) handleUDP() {
+    addr, err := net.ResolveUDPAddr("udp", s.address)
     if err != nil {
-        return err
+        log.Fatalf("Failed to resolve UDP address: %v", err)
+    }
+
+    conn, err := net.ListenUDP("udp", addr)
+    if err != nil {
+        log.Fatalf("Failed to listen on UDP: %v", err)
     }
     defer conn.Close()
 
-    logging.Info("UDP Server listening on %s", addr)
+    log.Printf("Listening for UDP connections on %s", s.address)
 
-    buf := make([]byte, 4096)
     for {
-        n, remoteAddr, err := conn.ReadFrom(buf)
+        buf := make([]byte, 64*1024)
+        n, remoteAddr, err := conn.ReadFromUDP(buf)
         if err != nil {
-            logging.Error("Failed to read UDP packet: %v", err)
+            log.Printf("Error reading UDP packet: %v", err)
             continue
         }
 
-        go handleUDPPacket(ss, conn, remoteAddr, buf[:n])
+        go s.handleUDPPacket(conn, remoteAddr, buf[:n])
     }
 }
 
-func handleUDPPacket(ss *protocol.Shadowsocks, conn net.PacketConn, remoteAddr net.Addr, data []byte) {
-    decrypted, err := ss.Cipher.Decrypt(data)
+func (s *Server) handleUDPPacket(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
+    cipher, err := crypto.NewCipher([]byte(s.password))
     if err != nil {
-        logging.Error("Failed to decrypt UDP packet: %v", err)
+        log.Printf("Failed to create cipher: %v", err)
         return
     }
 
-    // UDP packet format: [target address][payload]
-    targetAddr, payload, err := parseUDPPacket(decrypted)
+    decrypted, err := cipher.Decrypt(data)
     if err != nil {
-        logging.Error("Failed to parse UDP packet: %v", err)
+        log.Printf("Failed to decrypt UDP packet: %v", err)
         return
     }
 
-    targetConn, err := net.Dial("udp", targetAddr)
+    destAddr, err := socks.ParseAddress(decrypted)
     if err != nil {
-        logging.Error("Failed to connect to target: %v", err)
+        log.Printf("Failed to parse destination address: %v", err)
+        return
+    }
+
+    udpAddr, err := net.ResolveUDPAddr("udp", destAddr)
+    if err != nil {
+        log.Printf("Failed to resolve destination UDP address: %v", err)
+        return
+    }
+
+    payload := decrypted[len(decrypted)-len(data)+3:]
+
+    targetConn, err := net.DialUDP("udp", nil, udpAddr)
+    if err != nil {
+        log.Printf("Failed to connect to target: %v", err)
         return
     }
     defer targetConn.Close()
 
     _, err = targetConn.Write(payload)
     if err != nil {
-        logging.Error("Failed to send payload to target: %v", err)
+        log.Printf("Failed to send data to target: %v", err)
         return
     }
 
-    response := make([]byte, 4096)
-    n, err := targetConn.Read(response)
+    responseBuf := make([]byte, 64*1024)
+    n, _, err := targetConn.ReadFromUDP(responseBuf)
     if err != nil {
-        logging.Error("Failed to read response from target: %v", err)
+        log.Printf("Failed to receive response from target: %v", err)
         return
     }
 
-    encryptedResponse, err := ss.Cipher.Encrypt(response[:n])
+    responseAddr := make([]byte, 0, 300)
+    responseAddr = append(responseAddr, 0x01) // IPv4
+    responseAddr = append(responseAddr, udpAddr.IP.To4()...)
+    responseAddr = binary.BigEndian.AppendUint16(responseAddr, uint16(udpAddr.Port))
+
+    response := append(responseAddr, responseBuf[:n]...)
+    encrypted, err := cipher.Encrypt(response)
     if err != nil {
-        logging.Error("Failed to encrypt response: %v", err)
+        log.Printf("Failed to encrypt response: %v", err)
         return
     }
 
-    _, err = conn.WriteTo(encryptedResponse, remoteAddr)
+    _, err = conn.WriteToUDP(encrypted, remoteAddr)
     if err != nil {
-        logging.Error("Failed to send response to client: %v", err)
+        log.Printf("Failed to send response: %v", err)
+        return
     }
-}
-
-func parseUDPPacket(packet []byte) (string, []byte, error) {
-    // Implement UDP packet parsing logic here
-    // Return target address and payload
-    return "", nil, nil
 }

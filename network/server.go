@@ -9,7 +9,10 @@ import (
     "io"
     "log"
     "net"
+    "os"
+    "os/signal"
     "sync"
+    "syscall"
     "time"
 
     "github.com/go-redis/redis/v8"
@@ -29,6 +32,9 @@ type Server struct {
     udpSessionMutex sync.Mutex
     redisClient    *redis.Client
     rateLimiter    *RateLimiter
+    listener       net.Listener
+    shutdown       chan struct{}
+    wg             sync.WaitGroup
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -39,6 +45,7 @@ func NewServer(cfg *config.Config) *Server {
             Addr: cfg.RedisAddr,
         }),
         rateLimiter: NewRateLimiter(rate.Limit(cfg.RateLimit), cfg.RateBurst),
+        shutdown:    make(chan struct{}),
     }
 }
 
@@ -46,36 +53,73 @@ func (s *Server) Start() error {
     var err error
     s.cipher, err = crypto.NewCipher(s.config.Password)
     if err != nil {
-        return fmt.Errorf("failed to create cipher: %v", err)
+        return fmt.Errorf("failed to create cipher: %w", err)
     }
 
     go s.rotateKey()
 
-    listener, err := net.Listen("tcp", s.config.Address)
+    s.listener, err = net.Listen("tcp", s.config.Address)
     if err != nil {
-        return fmt.Errorf("failed to listen on %s: %v", s.config.Address, err)
+        return fmt.Errorf("failed to listen on %s: %w", s.config.Address, err)
     }
-    defer listener.Close()
 
-    s.udpConn, err = net.ListenUDP("udp", listener.Addr().(*net.TCPAddr))
+    s.udpConn, err = net.ListenUDP("udp", s.listener.Addr().(*net.TCPAddr))
     if err != nil {
-        return fmt.Errorf("failed to listen UDP on %s: %v", s.config.Address, err)
+        s.listener.Close()
+        return fmt.Errorf("failed to listen UDP on %s: %w", s.config.Address, err)
     }
-    defer s.udpConn.Close()
 
     go s.handleUDP()
 
     log.Printf("Server listening on %s", s.config.Address)
 
+    go s.acceptConnections()
+
+    return s.waitForShutdown()
+}
+
+func (s *Server) acceptConnections() {
     for {
-        conn, err := listener.Accept()
+        conn, err := s.listener.Accept()
         if err != nil {
-            log.Printf("Failed to accept connection: %v", err)
-            continue
+            select {
+            case <-s.shutdown:
+                return
+            default:
+                log.Printf("Failed to accept connection: %v", err)
+                continue
+            }
         }
 
-        go s.handleConnection(conn)
+        s.wg.Add(1)
+        go func() {
+            defer s.wg.Done()
+            s.handleConnection(conn)
+        }()
     }
+}
+
+func (s *Server) waitForShutdown() error {
+    sigCh := make(chan os.Signal, 1)
+    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+    <-sigCh
+    log.Println("Shutdown signal received")
+
+    close(s.shutdown)
+
+    if err := s.listener.Close(); err != nil {
+        log.Printf("Error closing listener: %v", err)
+    }
+
+    if err := s.udpConn.Close(); err != nil {
+        log.Printf("Error closing UDP connection: %v", err)
+    }
+
+    s.wg.Wait()
+    log.Println("All connections have been closed")
+
+    return nil
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -171,8 +215,13 @@ func (s *Server) handleUDP() {
     for {
         n, remoteAddr, err := s.udpConn.ReadFromUDP(buffer)
         if err != nil {
-            log.Printf("Failed to read UDP packet: %v", err)
-            continue
+            select {
+            case <-s.shutdown:
+                return
+            default:
+                log.Printf("Failed to read UDP packet: %v", err)
+                continue
+            }
         }
 
         go s.processUDPPacket(remoteAddr, buffer[:n])
@@ -269,21 +318,26 @@ func (s *Server) rotateKey() {
     ticker := time.NewTicker(time.Duration(s.config.KeyRotationHours) * time.Hour)
     defer ticker.Stop()
 
-    for range ticker.C {
-        newKey := make([]byte, 32)
-        if _, err := rand.Read(newKey); err != nil {
-            log.Printf("Failed to generate new key: %v", err)
-            continue
-        }
+    for {
+        select {
+        case <-ticker.C:
+            newKey := make([]byte, 32)
+            if _, err := rand.Read(newKey); err != nil {
+                log.Printf("Failed to generate new key: %v", err)
+                continue
+            }
 
-        newCipher, err := crypto.NewCipher(string(newKey))
-        if err != nil {
-            log.Printf("Failed to create new cipher: %v", err)
-            continue
-        }
+            newCipher, err := crypto.NewCipher(string(newKey))
+            if err != nil {
+                log.Printf("Failed to create new cipher: %v", err)
+                continue
+            }
 
-        s.cipher = newCipher
-        log.Println("Encryption key rotated")
+            s.cipher = newCipher
+            log.Println("Encryption key rotated")
+        case <-s.shutdown:
+            return
+        }
     }
 }
 

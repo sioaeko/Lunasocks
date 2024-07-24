@@ -137,8 +137,6 @@ func (s *Server) readCommand(conn net.Conn) ([]byte, error) {
 }
 
 func (s *Server) processCommand(cmd []byte) []byte {
-    // 여기에 명령 처리 로직을 구현합니다.
-    // 지금은 간단히 에코 서버처럼 동작하도록 하겠습니다.
     return cmd
 }
 
@@ -149,4 +147,8 @@ func (s *Server) writeResponse(conn net.Conn, response []byte) error {
 
     _, err := conn.Write(response)
     return err
+}
+
+func (s *Server) IsRunning() bool {
+    return s.listener != nil
 }

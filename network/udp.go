@@ -1,8 +1,7 @@
-package server
+package network
 
 import (
     "encoding/binary"
-    "fmt"
     "log"
     "net"
     "time"

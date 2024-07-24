@@ -1,21 +1,17 @@
 package config
 
 import (
-    "io/ioutil"
-    "time"
-
     "gopkg.in/yaml.v2"
+    "io/ioutil"
 )
 
 type Config struct {
-    Address          string        `yaml:"address"`
-    Password         string        `yaml:"password"`
-    Timeout          time.Duration `yaml:"timeout"`
-    RedisAddr        string        `yaml:"redis_address"`
-    MetricsAddr      string        `yaml:"metrics_address"`
-    RateLimit        float64       `yaml:"rate_limit"`
-    RateBurst        int           `yaml:"rate_burst"`
-    KeyRotationHours int           `yaml:"key_rotation_hours"`
+    ServerAddress string `yaml:"server_address"`
+    Password      string `yaml:"password"`
+    UseTLS        bool   `yaml:"use_tls"`
+    TLSCertFile   string `yaml:"tls_cert_file"`
+    TLSKeyFile    string `yaml:"tls_key_file"`
+    // 추가 설정 필드
 }
 
 func LoadConfig(filename string) (*Config, error) {
@@ -24,11 +20,11 @@ func LoadConfig(filename string) (*Config, error) {
         return nil, err
     }
 
-    var config Config
-    err = yaml.Unmarshal(data, &config)
+    var cfg Config
+    err = yaml.Unmarshal(data, &cfg)
     if err != nil {
         return nil, err
     }
 
-    return &config, nil
+    return &cfg, nil
 }

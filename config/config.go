@@ -1,45 +1,34 @@
 package config
 
 import (
-    "encoding/json"
-    "os"
+    "io/ioutil"
     "time"
+
+    "gopkg.in/yaml.v2"
 )
 
 type Config struct {
-    ServerAddr     string        `json:"server_addr"`
-    LocalAddr      string        `json:"local_addr"`
-    Password       string        `json:"password"`
-    Method         string        `json:"method"`
-    Timeout        time.Duration `json:"timeout"`
-    LogLevel       string        `json:"log_level"`
-    EnableUDP      bool          `json:"enable_udp"`
+    Address          string        `yaml:"address"`
+    Password         string        `yaml:"password"`
+    Timeout          time.Duration `yaml:"timeout"`
+    RedisAddr        string        `yaml:"redis_address"`
+    MetricsAddr      string        `yaml:"metrics_address"`
+    RateLimit        float64       `yaml:"rate_limit"`
+    RateBurst        int           `yaml:"rate_burst"`
+    KeyRotationHours int           `yaml:"key_rotation_hours"`
 }
 
 func LoadConfig(filename string) (*Config, error) {
-    file, err := os.Open(filename)
-    if err != nil {
-        return nil, err
-    }
-    defer file.Close()
-
-    decoder := json.NewDecoder(file)
-    config := &Config{}
-    err = decoder.Decode(config)
+    data, err := ioutil.ReadFile(filename)
     if err != nil {
         return nil, err
     }
 
-    // Set default values
-    if config.Timeout == 0 {
-        config.Timeout = 5 * time.Minute
-    }
-    if config.LogLevel == "" {
-        config.LogLevel = "info"
-    }
-    if config.Method == "" {
-        config.Method = "aes-256-gcm"
+    var config Config
+    err = yaml.Unmarshal(data, &config)
+    if err != nil {
+        return nil, err
     }
 
-    return config, nil
+    return &config, nil
 }

@@ -3,17 +3,16 @@ package socks
 import (
     "encoding/binary"
     "errors"
-    "fmt"
     "net"
     "strconv"
 )
 
 var (
-    ErrAddressTooShort = errors.New("address too short")
+    ErrAddressTooShort    = errors.New("address too short")
     ErrInvalidAddressType = errors.New("invalid address type")
     ErrInvalidIPv4Address = errors.New("invalid IPv4 address")
     ErrInvalidIPv6Address = errors.New("invalid IPv6 address")
-    ErrInvalidPort = errors.New("invalid port")
+    ErrInvalidPort        = errors.New("invalid port")
 )
 
 func ParseAddress(b []byte) (string, error) {
@@ -50,4 +49,38 @@ func ParseAddress(b []byte) (string, error) {
     port = strconv.Itoa(int(portNum))
 
     return net.JoinHostPort(host, port)
+}
+
+func ParseUDPAddress(b []byte) (string, []byte, error) {
+    if len(b) < 4 {
+        return "", nil, ErrAddressTooShort
+    }
+
+    addrType := b[3]
+
+    var addrLen int
+    switch addrType {
+    case 1:
+        addrLen = 4
+    case 4:
+        addrLen = 16
+    case 3:
+        if len(b) < 5 {
+            return "", nil, ErrAddressTooShort
+        }
+        addrLen = int(b[4]) + 1
+    default:
+        return "", nil, ErrInvalidAddressType
+    }
+
+    if len(b) < 4+addrLen+2 {
+        return "", nil, ErrAddressTooShort
+    }
+
+    addr, err := ParseAddress(b[3:])
+    if err != nil {
+        return "", nil, err
+    }
+
+    return addr, b[4+addrLen:], nil
 }

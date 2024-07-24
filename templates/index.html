@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LunaSocks Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #333; }
+        .config { background: #f4f4f4; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+        input { width: 100%; padding: 5px; margin-bottom: 10px; }
+        button { background: #333; color: #fff; padding: 10px; border: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div id="app" class="container">
+        <h1>LunaSocks Dashboard</h1>
+        
+        <div class="config">
+            <h2>Server Configuration</h2>
+            <input v-model="config.Server" placeholder="Server">
+            <input v-model="config.ServerPort" placeholder="Server Port" type="number">
+            <input v-model="config.Password" placeholder="Password" type="password">
+            <input v-model="config.Method" placeholder="Encryption Method">
+            <button @click="updateConfig">Update Configuration</button>
+        </div>
+    </div>
+
+    <script>
+    new Vue({
+        el: '#app',
+        data: {
+            config: {}
+        },
+        methods: {
+            fetchConfig() {
+                axios.get('/api/config')
+                    .then(response => {
+                        this.config = response.data;
+                    })
+                    .catch(error => console.error(error));
+            },
+            updateConfig() {
+                axios.post('/api/config', this.config)
+                    .then(() => alert('Configuration updated successfully'))
+                    .catch(error => console.error(error));
+            }
+        },
+        mounted() {
+            this.fetchConfig();
+        }
+    });
+    </script>
+</body>
+</html>

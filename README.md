@@ -38,6 +38,37 @@ feature-rich server that takes your network capabilities to the next level.
 2. Install:  `cd lunasocks && go mod tidy`
 3. Launch:   `go run main.go`
 
+## 📁 Project Structure
+```
+luna_socks/
+│
+├── cmd/
+│ └── lunasocks/
+│ └── main.go # Entry point of the application
+│
+├── internal/
+│ ├── auth/ # Authentication related code
+│ ├── config/ # Configuration handling
+│ ├── proxy/ # Core proxy functionality
+│ ├── plugins/ # Plugin system
+│ └── web/ # Web interface
+│
+├── pkg/
+│ └── utils/ # Utility functions used across the project
+│
+├── scripts/ # Helper scripts (e.g., for building, testing)
+│
+├── web/
+│ ├── static/ # Static assets for web interface
+│ └── templates/ # HTML templates
+│
+├── config.yaml # Default configuration file
+├── go.mod
+├── go.sum
+└── README.md
+```
+
+
 ## 🔧 Configuration Made Easy
 
 Edit `config.yaml` to tailor Lunasocks to your needs:

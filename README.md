@@ -40,29 +40,31 @@ feature-rich server that takes your network capabilities to the next level.
 
 ## 📁 Project Structure
 ```
-luna_socks/
-│
+lunasocks/
 ├── cmd/
-│ └── lunasocks/
-│ └── main.go # Entry point of the application
-│
+│   └── lunasocks/
+│       └── main.go
 ├── internal/
-│ ├── auth/ # Authentication related code
-│ ├── config/ # Configuration handling
-│ ├── proxy/ # Core proxy functionality
-│ ├── plugins/ # Plugin system
-│ └── web/ # Web interface
-│
+│   ├── config/
+│   │   └── config.go
+│   ├── crypto/
+│   │   ├── cipher.go
+│   │   └── key.go
+│   ├── logging/
+│   │   └── logger.go
+│   ├── network/
+│   │   ├── server.go
+│   │   ├── tcp.go
+│   │   └── udp.go
+│   ├── protocol/
+│   │   ├── socks5.go
+│   │   └── shadowsocks.go
+│   └── socks/
+│       └── socks.go
 ├── pkg/
-│ └── utils/ # Utility functions used across the project
-│
-├── scripts/ # Helper scripts (e.g., for building, testing)
-│
-├── web/
-│ ├── static/ # Static assets for web interface
-│ └── templates/ # HTML templates
-│
-├── config.yaml # Default configuration file
+│   └── utils/
+│       └── pool.go
+├── config.yaml
 ├── go.mod
 ├── go.sum
 └── README.md

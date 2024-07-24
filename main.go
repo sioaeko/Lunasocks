@@ -6,12 +6,15 @@ import (
     "your_project/config"
     "your_project/network"
     "your_project/plugin"
+    "your_project/web" // 새로 추가할 웹 서버 패키지
 )
 
 func main() {
     // 명령줄 인자 처리
     configFile := flag.String("config", "config.yaml", "Path to configuration file")
     enableTLS := flag.Bool("tls", false, "Enable TLS")
+    enableWebAdmin := flag.Bool("web-admin", false, "Enable web admin interface")
+    webAdminPort := flag.Int("web-admin-port", 8080, "Web admin interface port")
     flag.Parse()
 
     // 설정 파일 로드
@@ -39,6 +42,16 @@ func main() {
     // 플러그인 추가
     server.AddPlugin(&plugin.LoggingPlugin{})
     // 추가 플러그인은 여기에 구현
+
+    // 웹 관리 인터페이스 활성화 (명령줄 인자로 지정된 경우)
+    if *enableWebAdmin {
+        go func() {
+            webServer := web.NewWebServer(cfg, *webAdminPort)
+            if err := webServer.Start(); err != nil {
+                log.Fatalf("Web admin interface failed to start: %v", err)
+            }
+        }()
+    }
 
     // 서버 시작
     if err := server.Start(); err != nil {

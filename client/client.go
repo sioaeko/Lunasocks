@@ -6,6 +6,7 @@ import (
     "io"
     "log"
     "net"
+    "sync"
     "time"
 
     "your_project/crypto"
@@ -17,6 +18,9 @@ type Client struct {
     localAddr  string
     password   string
     timeout    time.Duration
+    udpAddr    *net.UDPAddr
+    udpConn    *net.UDPConn
+    cipher     *crypto.Cipher
 }
 
 func NewClient(serverAddr, localAddr, password string, timeout time.Duration) *Client {
@@ -29,148 +33,144 @@ func NewClient(serverAddr, localAddr, password string, timeout time.Duration) *C
 }
 
 func (c *Client) Start() error {
-    listener, err := net.Listen("tcp", c.localAddr)
+    tcpListener, err := net.Listen("tcp", c.localAddr)
     if err != nil {
         return err
     }
-    defer listener.Close()
+    defer tcpListener.Close()
 
-    log.Printf("Client listening on %s", c.localAddr)
+    c.udpAddr, err = net.ResolveUDPAddr("udp", c.localAddr)
+    if err != nil {
+        return err
+    }
+
+    c.udpConn, err = net.ListenUDP("udp", c.udpAddr)
+    if err != nil {
+        return err
+    }
+    defer c.udpConn.Close()
+
+    c.cipher, err = crypto.NewCipher([]byte(c.password))
+    if err != nil {
+        return err
+    }
+
+    log.Printf("Client listening on TCP %s and UDP %s", c.localAddr, c.udpAddr)
+
+    go c.handleUDP()
 
     for {
-        conn, err := listener.Accept()
+        conn, err := tcpListener.Accept()
         if err != nil {
             log.Printf("Failed to accept connection: %v", err)
             continue
         }
 
-        go c.handleConnection(conn)
+        go c.handleTCPConnection(conn)
     }
 }
 
-func (c *Client) handleConnection(conn net.Conn) {
-    defer conn.Close()
-
-    if err := c.handshake(conn); err != nil {
-        log.Printf("Handshake failed: %v", err)
-        return
-    }
-
-    serverConn, err := net.DialTimeout("tcp", c.serverAddr, c.timeout)
-    if err != nil {
-        log.Printf("Failed to connect to server: %v", err)
-        return
-    }
-    defer serverConn.Close()
-
-    cipher, err := crypto.NewCipher([]byte(c.password))
-    if err != nil {
-        log.Printf("Failed to create cipher: %v", err)
-        return
-    }
-
-    go func() {
-        if err := c.pipe(serverConn, conn, cipher.Decrypt); err != nil {
-            log.Printf("Error in server to client pipe: %v", err)
-        }
-    }()
-
-    if err := c.pipe(conn, serverConn, cipher.Encrypt); err != nil {
-        log.Printf("Error in client to server pipe: %v", err)
-    }
-}
-
-func (c *Client) handshake(conn net.Conn) error {
-    buf := make([]byte, 257)
-    if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-        return err
-    }
-
-    if buf[0] != 5 {
-        return errors.New("invalid SOCKS version")
-    }
-
-    nMethods := int(buf[1])
-    if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
-        return err
-    }
-
-    _, err := conn.Write([]byte{5, 0})
-    if err != nil {
-        return err
-    }
-
-    if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-        return err
-    }
-
-    if buf[0] != 5 {
-        return errors.New("invalid SOCKS version")
-    }
-
-    if buf[1] != 1 {
-        return errors.New("only TCP connect is supported")
-    }
-
-    if buf[2] != 0 {
-        return errors.New("reserved field must be 0")
-    }
-
-    var addr string
-    switch buf[3] {
-    case 1:
-        if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-            return err
-        }
-        addr = net.IP(buf[:4]).String()
-    case 3:
-        if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-            return err
-        }
-        addrLen := int(buf[0])
-        if _, err := io.ReadFull(conn, buf[:addrLen]); err != nil {
-            return err
-        }
-        addr = string(buf[:addrLen])
-    case 4:
-        if _, err := io.ReadFull(conn, buf[:16]); err != nil {
-            return err
-        }
-        addr = net.IP(buf[:16]).String()
-    default:
-        return errors.New("invalid address type")
-    }
-
-    if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-        return err
-    }
-    port := binary.BigEndian.Uint16(buf[:2])
-
-    address := net.JoinHostPort(addr, string(port))
-    reply := []byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}
-    _, err = conn.Write(reply)
-    return err
-}
-
-func (c *Client) pipe(dst io.Writer, src io.Reader, transform func([]byte) ([]byte, error)) error {
-    buf := make([]byte, 1024)
+func (c *Client) handleUDP() {
+    buf := make([]byte, 64*1024)
     for {
-        n, err := src.Read(buf)
-        if n > 0 {
-            data, err := transform(buf[:n])
-            if err != nil {
-                return err
-            }
-            _, err = dst.Write(data)
-            if err != nil {
-                return err
-            }
-        }
+        n, remoteAddr, err := c.udpConn.ReadFromUDP(buf)
         if err != nil {
-            if err == io.EOF {
-                return nil
-            }
-            return err
+            log.Printf("Error reading UDP: %v", err)
+            continue
         }
+
+        go c.handleUDPPacket(remoteAddr, buf[:n])
+    }
+}
+
+func (c *Client) handleUDPPacket(remoteAddr *net.UDPAddr, data []byte) {
+    if len(data) < 3 {
+        log.Printf("Invalid UDP packet")
+        return
+    }
+
+    // SOCKS5 UDP request
+    // +----+------+------+----------+----------+----------+
+    // |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
+    // +----+------+------+----------+----------+----------+
+    // | 2  |  1   |  1   | Variable |    2     | Variable |
+    // +----+------+------+----------+----------+----------+
+
+    if data[2] != 0 {
+        log.Printf("Fragmented UDP packets not supported")
+        return
+    }
+
+    // Extract target address
+    addrType := data[3]
+    var dstAddr string
+    var dstPort uint16
+    var bodyStart int
+
+    switch addrType {
+    case 1: // IPv4
+        dstAddr = net.IP(data[4:8]).String()
+        dstPort = binary.BigEndian.Uint16(data[8:10])
+        bodyStart = 10
+    case 3: // Domain name
+        addrLen := int(data[4])
+        dstAddr = string(data[5 : 5+addrLen])
+        dstPort = binary.BigEndian.Uint16(data[5+addrLen : 7+addrLen])
+        bodyStart = 7 + addrLen
+    case 4: // IPv6
+        dstAddr = net.IP(data[4:20]).String()
+        dstPort = binary.BigEndian.Uint16(data[20:22])
+        bodyStart = 22
+    default:
+        log.Printf("Unsupported address type: %d", addrType)
+        return
+    }
+
+    targetAddr := net.JoinHostPort(dstAddr, string(dstPort))
+
+    // Encrypt and send to server
+    encryptedData, err := c.cipher.Encrypt(data[bodyStart:])
+    if err != nil {
+        log.Printf("Error encrypting UDP data: %v", err)
+        return
+    }
+
+    serverUDPAddr, err := net.ResolveUDPAddr("udp", c.serverAddr)
+    if err != nil {
+        log.Printf("Error resolving server address: %v", err)
+        return
+    }
+
+    _, err = c.udpConn.WriteToUDP(encryptedData, serverUDPAddr)
+    if err != nil {
+        log.Printf("Error sending UDP data to server: %v", err)
+        return
+    }
+
+    // Wait for response
+    responseBuf := make([]byte, 64*1024)
+    c.udpConn.SetReadDeadline(time.Now().Add(c.timeout))
+    n, _, err := c.udpConn.ReadFromUDP(responseBuf)
+    if err != nil {
+        log.Printf("Error receiving UDP response: %v", err)
+        return
+    }
+
+    // Decrypt response
+    decryptedData, err := c.cipher.Decrypt(responseBuf[:n])
+    if err != nil {
+        log.Printf("Error decrypting UDP response: %v", err)
+        return
+    }
+
+    // Construct SOCKS5 UDP response
+    response := make([]byte, len(decryptedData)+bodyStart)
+    copy(response[:bodyStart], data[:bodyStart])
+    copy(response[bodyStart:], decryptedData)
+
+    // Send response back to client
+    _, err = c.udpConn.WriteToUDP(response, remoteAddr)
+    if err != nil {
+        log.Printf("Error sending UDP response to client: %v", err)
     }
 }

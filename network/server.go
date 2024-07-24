@@ -4,32 +4,24 @@ import (
     "context"
     "crypto/rand"
     "encoding/binary"
-    "encoding/json"
+    "errors"
+    "fmt"
     "io"
     "log"
     "net"
-    "net/http"
     "sync"
     "time"
 
     "github.com/go-redis/redis/v8"
-    "github.com/prometheus/client_golang/prometheus"
-    "github.com/prometheus/client_golang/prometheus/promhttp"
     "golang.org/x/time/rate"
 
+    "your_project/config"
     "your_project/crypto"
     "your_project/socks"
 )
 
-type UDPSession struct {
-    LastSeen time.Time
-    Nonce    uint32
-}
-
 type Server struct {
-    addr           string
-    password       string
-    timeout        time.Duration
+    config         *config.Config
     cipher         *crypto.Cipher
     udpConn        *net.UDPConn
     udpMutex       sync.Mutex
@@ -39,338 +31,252 @@ type Server struct {
     rateLimiter    *RateLimiter
 }
 
-type RateLimiter struct {
-    limiters map[string]*rate.Limiter
-    mu       sync.Mutex
-    r        rate.Limit
-    b        int
-}
-
-var bufferPool = sync.Pool{
-    New: func() interface{} {
-        return make([]byte, 64*1024)
-    },
-}
-
-var (
-    udpPacketsReceived = prometheus.NewCounter(prometheus.CounterOpts{
-        Name: "udp_packets_received_total",
-        Help: "Total number of UDP packets received",
-    })
-    tcpConnectionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-        Name: "tcp_connections_total",
-        Help: "Total number of TCP connections",
-    })
-)
-
-func init() {
-    prometheus.MustRegister(udpPacketsReceived)
-    prometheus.MustRegister(tcpConnectionsTotal)
-}
-
-func NewServer(addr, password string, timeout time.Duration, redisAddr string) *Server {
+func NewServer(cfg *config.Config) *Server {
     return &Server{
-        addr:        addr,
-        password:    password,
-        timeout:     timeout,
+        config:      cfg,
         udpSessions: make(map[string]*UDPSession),
         redisClient: redis.NewClient(&redis.Options{
-            Addr: redisAddr,
+            Addr: cfg.RedisAddr,
         }),
-        rateLimiter: NewRateLimiter(10, 30), // 10 requests per second, burst of 30
+        rateLimiter: NewRateLimiter(rate.Limit(cfg.RateLimit), cfg.RateBurst),
     }
-}
-
-func NewRateLimiter(r rate.Limit, b int) *RateLimiter {
-    return &RateLimiter{
-        limiters: make(map[string]*rate.Limiter),
-        r:        r,
-        b:        b,
-    }
-}
-
-func (l *RateLimiter) Allow(key string) bool {
-    l.mu.Lock()
-    limiter, exists := l.limiters[key]
-    if !exists {
-        limiter = rate.NewLimiter(l.r, l.b)
-        l.limiters[key] = limiter
-    }
-    l.mu.Unlock()
-    return limiter.Allow()
 }
 
 func (s *Server) Start() error {
-    cipher, err := crypto.NewCipher([]byte(s.password))
+    var err error
+    s.cipher, err = crypto.NewCipher(s.config.Password)
     if err != nil {
-        return err
-    }
-    s.cipher = cipher
-
-    tcpListener, err := net.Listen("tcp", s.addr)
-    if err != nil {
-        return err
-    }
-    defer tcpListener.Close()
-
-    udpAddr, err := net.ResolveUDPAddr("udp", s.addr)
-    if err != nil {
-        return err
+        return fmt.Errorf("failed to create cipher: %v", err)
     }
 
-    s.udpConn, err = net.ListenUDP("udp", udpAddr)
+    go s.rotateKey()
+
+    listener, err := net.Listen("tcp", s.config.Address)
     if err != nil {
-        return err
+        return fmt.Errorf("failed to listen on %s: %v", s.config.Address, err)
+    }
+    defer listener.Close()
+
+    s.udpConn, err = net.ListenUDP("udp", listener.Addr().(*net.TCPAddr))
+    if err != nil {
+        return fmt.Errorf("failed to listen UDP on %s: %v", s.config.Address, err)
     }
     defer s.udpConn.Close()
 
-    log.Printf("Server listening on TCP and UDP %s", s.addr)
-
     go s.handleUDP()
-    go s.cleanupUDPSessions()
-    go s.rotateEncryptionKey()
-    go s.StartMetricsServer(":8080")
+
+    log.Printf("Server listening on %s", s.config.Address)
 
     for {
-        conn, err := tcpListener.Accept()
+        conn, err := listener.Accept()
         if err != nil {
             log.Printf("Failed to accept connection: %v", err)
             continue
         }
 
-        go s.handleTCPConnection(conn)
+        go s.handleConnection(conn)
     }
 }
 
-func (s *Server) handleTCPConnection(conn net.Conn) {
+func (s *Server) handleConnection(conn net.Conn) {
     defer conn.Close()
-    tcpConnectionsTotal.Inc()
 
-    if err := conn.SetDeadline(time.Now().Add(s.timeout)); err != nil {
-        log.Printf("Failed to set deadline: %v", err)
+    if err := s.authenticate(conn); err != nil {
+        log.Printf("Authentication failed: %v", err)
         return
     }
 
-    clientAddr := conn.RemoteAddr().String()
-    log.Printf("New TCP connection from %s", clientAddr)
-
-    encReader := crypto.NewReader(conn, s.cipher)
-    encWriter := crypto.NewWriter(conn, s.cipher)
-
-    header := make([]byte, 3)
-    if _, err := io.ReadFull(encReader, header); err != nil {
-        log.Printf("Failed to read SOCKS5 header: %v", err)
+    if !s.rateLimiter.Allow() {
+        log.Printf("Rate limit exceeded for %s", conn.RemoteAddr())
         return
     }
 
-    if header[0] != socks.Version5 {
-        log.Printf("Unsupported SOCKS version: %d", header[0])
-        return
-    }
-
-    dstAddr, err := socks.ReadAddr(encReader)
+    request, err := socks.ReadRequest(conn)
     if err != nil {
-        log.Printf("Failed to read destination address: %v", err)
+        log.Printf("Failed to read SOCKS request: %v", err)
         return
     }
 
-    log.Printf("TCP request from %s to %s", clientAddr, dstAddr)
-
-    dstConn, err := net.DialTimeout("tcp", dstAddr.String(), s.timeout)
-    if err != nil {
-        log.Printf("Failed to connect to destination: %v", err)
-        return
-    }
-    defer dstConn.Close()
-
-    go func() {
-        if _, err := io.Copy(dstConn, encReader); err != nil {
-            log.Printf("Failed to proxy data to destination: %v", err)
-        }
-    }()
-
-    if _, err := io.Copy(encWriter, dstConn); err != nil {
-        log.Printf("Failed to proxy data to client: %v", err)
-    }
-}
-
-func (s *Server) handleUDP() {
-    for {
-        buf := bufferPool.Get().([]byte)
-        n, remoteAddr, err := s.udpConn.ReadFromUDP(buf)
-        if err != nil {
-            log.Printf("Error reading UDP: %v", err)
-            bufferPool.Put(buf)
-            continue
-        }
-
-        go func() {
-            s.handleUDPPacket(remoteAddr, buf[:n])
-            bufferPool.Put(buf)
-        }()
-    }
-}
-
-func (s *Server) handleUDPPacket(remoteAddr *net.UDPAddr, data []byte) {
-    udpPacketsReceived.Inc()
-
-    if !s.rateLimiter.Allow(remoteAddr.String()) {
-        log.Printf("Rate limit exceeded for %s", remoteAddr)
-        return
-    }
-
-    if len(data) < 8 {
-        log.Printf("Invalid UDP packet: too short")
-        return
-    }
-
-    nonce := binary.BigEndian.Uint32(data[:4])
-    timestamp := binary.BigEndian.Uint32(data[4:8])
-    
-    sessionKey := remoteAddr.String()
-    session, err := s.getSessionFromRedis(sessionKey)
-    if err != nil {
-        session = &UDPSession{Nonce: nonce}
-        if err := s.setSessionToRedis(sessionKey, session); err != nil {
-            log.Printf("Failed to set session to Redis: %v", err)
-        }
-    }
-
-    if nonce <= session.Nonce {
-        log.Printf("Possible replay attack detected from %s", remoteAddr)
-        return
-    }
-
-    if time.Now().Unix()-int64(timestamp) > 300 {
-        log.Printf("Stale packet detected from %s", remoteAddr)
-        return
-    }
-
-    session.Nonce = nonce
-    session.LastSeen = time.Now()
-    if err := s.setSessionToRedis(sessionKey, session); err != nil {
-        log.Printf("Failed to update session in Redis: %v", err)
-    }
-
-    decryptedData, err := s.cipher.Decrypt(data[8:])
-    if err != nil {
-        log.Printf("Error decrypting UDP data: %v", err)
-        return
-    }
-
-    if len(decryptedData) < 3 {
-        log.Printf("Invalid UDP packet")
-        return
-    }
-
-    addrType := decryptedData[0]
-    var dstAddr string
-    var dstPort uint16
-    var bodyStart int
-
-    switch addrType {
-    case 1: // IPv4
-        dstAddr = net.IP(decryptedData[1:5]).String()
-        dstPort = binary.BigEndian.Uint16(decryptedData[5:7])
-        bodyStart = 7
-    case 3: // Domain name
-        addrLen := int(decryptedData[1])
-        dstAddr = string(decryptedData[2 : 2+addrLen])
-        dstPort = binary.BigEndian.Uint16(decryptedData[2+addrLen : 4+addrLen])
-        bodyStart = 4 + addrLen
-    case 4: // IPv6
-        dstAddr = net.IP(decryptedData[1:17]).String()
-        dstPort = binary.BigEndian.Uint16(decryptedData[17:19])
-        bodyStart = 19
+    switch request.Cmd {
+    case socks.CmdConnect:
+        s.handleTCP(conn, request)
+    case socks.CmdUDP:
+        s.handleUDPAssociate(conn, request)
     default:
-        log.Printf("Unsupported address type: %d", addrType)
-        return
+        log.Printf("Unsupported SOCKS command: %v", request.Cmd)
     }
+}
 
-    targetAddr := net.JoinHostPort(dstAddr, string(dstPort))
-    log.Printf("UDP request from %s to %s", remoteAddr, targetAddr)
-
-    targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddr)
+func (s *Server) handleTCP(clientConn net.Conn, request *socks.Request) {
+    targetConn, err := net.DialTimeout("tcp", request.DestAddr.String(), s.config.Timeout)
     if err != nil {
-        log.Printf("Error resolving target address: %v", err)
-        return
-    }
-
-    targetConn, err := net.DialUDP("udp", nil, targetUDPAddr)
-    if err != nil {
-        log.Printf("Error connecting to target: %v", err)
+        log.Printf("Failed to connect to %s: %v", request.DestAddr, err)
+        socks.SendReply(clientConn, socks.RepHostUnreachable)
         return
     }
     defer targetConn.Close()
 
-    _, err = targetConn.Write(decryptedData[bodyStart:])
-    if err != nil {
-        log.Printf("Error sending data to target: %v", err)
-        return
-    }
+    socks.SendReply(clientConn, socks.RepSuccess)
 
-    responseBuf := bufferPool.Get().([]byte)
-    defer bufferPool.Put(responseBuf)
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
 
-    targetConn.SetReadDeadline(time.Now().Add(s.timeout))
-    n, _, err := targetConn.ReadFromUDP(responseBuf)
-    if err != nil {
-        log.Printf("Error receiving response from target: %v", err)
-        return
-    }
-
-    response := make([]byte, n+bodyStart)
-    copy(response[:bodyStart], decryptedData[:bodyStart])
-    copy(response[bodyStart:], responseBuf[:n])
-
-    newNonce := make([]byte, 4)
-    _, err = rand.Read(newNonce)
-    if err != nil {
-        log.Printf("Error generating nonce: %v", err)
-        return
-    }
-    binary.BigEndian.PutUint32(response[:4], binary.BigEndian.Uint32(newNonce))
-    binary.BigEndian.PutUint32(response[4:8], uint32(time.Now().Unix()))
-
-    encryptedResponse, err := s.cipher.Encrypt(response)
-    if err != nil {
-        log.Printf("Error encrypting response: %v", err)
-        return
-    }
-
-    s.udpMutex.Lock()
-    _, err = s.udpConn.WriteToUDP(encryptedResponse, remoteAddr)
-    s.udpMutex.Unlock()
-    if err != nil {
-        log.Printf("Error sending response to client: %v", err)
-    }
-}
-
-func (s *Server) cleanupUDPSessions() {
-    ticker := time.NewTicker(5 * time.Minute)
-    for range ticker.C {
-        now := time.Now()
-        s.udpSessionMutex.Lock()
-        for addr, session := range s.udpSessions {
-            if now.Sub(session.LastSeen) > 10*time.Minute {
-                delete(s.udpSessions, addr)
-                s.redisClient.Del(context.Background(), addr)
-            }
+    go func() {
+        _, err := io.Copy(targetConn, s.cipher.DecryptReader(clientConn))
+        if err != nil && err != io.EOF {
+            log.Printf("Error in client -> target: %v", err)
         }
-        s.udpSessionMutex.Unlock()
+        cancel()
+    }()
+
+    _, err = io.Copy(s.cipher.EncryptWriter(clientConn), targetConn)
+    if err != nil && err != io.EOF {
+        log.Printf("Error in target -> client: %v", err)
     }
 }
 
-func (s *Server) rotateEncryptionKey() {
-    ticker := time.NewTicker(24 * time.Hour) // 매일 키 갱신
-    for range ticker.C {
-        newKey := make([]byte, 32)
-        if _, err := rand.Read(newKey); err != nil {
-            log.Printf("Failed to generate new encryption key: %v", err)
+func (s *Server) handleUDPAssociate(clientConn net.Conn, request *socks.Request) {
+    clientAddr := clientConn.RemoteAddr().(*net.TCPAddr)
+    relayAddr, err := net.ResolveUDPAddr("udp", s.config.Address)
+    if err != nil {
+        log.Printf("Failed to resolve UDP address: %v", err)
+        socks.SendReply(clientConn, socks.RepServerFailure)
+        return
+    }
+
+    socks.SendReply(clientConn, socks.RepSuccess, relayAddr)
+
+    key := clientAddr.String()
+    session := &UDPSession{
+        ClientAddr: clientAddr,
+        Cipher:     s.cipher,
+    }
+
+    s.udpSessionMutex.Lock()
+    s.udpSessions[key] = session
+    s.udpSessionMutex.Unlock()
+
+    defer func() {
+        s.udpSessionMutex.Lock()
+        delete(s.udpSessions, key)
+        s.udpSessionMutex.Unlock()
+    }()
+
+    // Keep the TCP connection alive
+    io.Copy(io.Discard, clientConn)
+}
+
+func (s *Server) handleUDP() {
+    buffer := make([]byte, 64*1024)
+    for {
+        n, remoteAddr, err := s.udpConn.ReadFromUDP(buffer)
+        if err != nil {
+            log.Printf("Failed to read UDP packet: %v", err)
             continue
         }
 
-        newCipher, err := crypto.NewCipher(newKey)
+        go s.processUDPPacket(remoteAddr, buffer[:n])
+    }
+}
+
+func (s *Server) processUDPPacket(remoteAddr *net.UDPAddr, data []byte) {
+    key := remoteAddr.String()
+
+    s.udpSessionMutex.Lock()
+    session, ok := s.udpSessions[key]
+    s.udpSessionMutex.Unlock()
+
+    if !ok {
+        log.Printf("No UDP session for %s", remoteAddr)
+        return
+    }
+
+    decrypted, err := session.Cipher.Decrypt(data)
+    if err != nil {
+        log.Printf("Failed to decrypt UDP packet: %v", err)
+        return
+    }
+
+    header, err := socks.ParseUDPHeader(decrypted)
+    if err != nil {
+        log.Printf("Failed to parse UDP header: %v", err)
+        return
+    }
+
+    targetAddr, err := net.ResolveUDPAddr("udp", header.DestAddr.String())
+    if err != nil {
+        log.Printf("Failed to resolve target address: %v", err)
+        return
+    }
+
+    targetConn, err := net.DialUDP("udp", nil, targetAddr)
+    if err != nil {
+        log.Printf("Failed to connect to target: %v", err)
+        return
+    }
+    defer targetConn.Close()
+
+    _, err = targetConn.Write(decrypted[header.HeaderLength:])
+    if err != nil {
+        log.Printf("Failed to write to target: %v", err)
+        return
+    }
+
+    response := make([]byte, 64*1024)
+    n, _, err := targetConn.ReadFromUDP(response)
+    if err != nil {
+        log.Printf("Failed to read from target: %v", err)
+        return
+    }
+
+    udpResponse := socks.PackUDPHeader(header.DestAddr)
+    udpResponse = append(udpResponse, response[:n]...)
+
+    encrypted, err := session.Cipher.Encrypt(udpResponse)
+    if err != nil {
+        log.Printf("Failed to encrypt UDP response: %v", err)
+        return
+    }
+
+    _, err = s.udpConn.WriteToUDP(encrypted, remoteAddr)
+    if err != nil {
+        log.Printf("Failed to write UDP response: %v", err)
+    }
+}
+
+func (s *Server) authenticate(conn net.Conn) error {
+    buf := make([]byte, 2)
+    if _, err := io.ReadFull(conn, buf); err != nil {
+        return fmt.Errorf("failed to read auth method: %v", err)
+    }
+
+    if buf[0] != 0x05 { // SOCKS5
+        return errors.New("invalid SOCKS version")
+    }
+
+    methods := make([]byte, buf[1])
+    if _, err := io.ReadFull(conn, methods); err != nil {
+        return fmt.Errorf("failed to read auth methods: %v", err)
+    }
+
+    // For simplicity, we're using the NO AUTHENTICATION REQUIRED method
+    conn.Write([]byte{0x05, 0x00})
+
+    return nil
+}
+
+func (s *Server) rotateKey() {
+    ticker := time.NewTicker(time.Duration(s.config.KeyRotationHours) * time.Hour)
+    defer ticker.Stop()
+
+    for range ticker.C {
+        newKey := make([]byte, 32)
+        if _, err := rand.Read(newKey); err != nil {
+            log.Printf("Failed to generate new key: %v", err)
+            continue
+        }
+
+        newCipher, err := crypto.NewCipher(string(newKey))
         if err != nil {
             log.Printf("Failed to create new cipher: %v", err)
             continue
@@ -381,31 +287,21 @@ func (s *Server) rotateEncryptionKey() {
     }
 }
 
-func (s *Server) StartMetricsServer(addr string) {
-    http.Handle("/metrics", promhttp.Handler())
-    log.Printf("Metrics server listening on %s", addr)
-    if err := http.ListenAndServe(addr, nil); err != nil {
-        log.Printf("Metrics server error: %v", err)
+type UDPSession struct {
+    ClientAddr *net.TCPAddr
+    Cipher     *crypto.Cipher
+}
+
+type RateLimiter struct {
+    limiter *rate.Limiter
+}
+
+func NewRateLimiter(r rate.Limit, b int) *RateLimiter {
+    return &RateLimiter{
+        limiter: rate.NewLimiter(r, b),
     }
 }
 
-func (s *Server) getSessionFromRedis(key string) (*UDPSession, error) {
-    val, err := s.redisClient.Get(context.Background(), key).Result()
-    if err != nil {
-        return nil, err
-    }
-    var session UDPSession
-    err = json.Unmarshal([]byte(val), &session)
-    if err != nil {
-        return nil, err
-    }
-    return &session, nil
-}
-
-func (s *Server) setSessionToRedis(key string, session *UDPSession) error {
-    sessionJSON, err := json.Marshal(session)
-    if err != nil {
-        return err
-    }
-    return s.redisClient.Set(context.Background(), key, string(sessionJSON), 10*time.Minute).Err()
+func (rl *RateLimiter) Allow() bool {
+    return rl.limiter.Allow()
 }

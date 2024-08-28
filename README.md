@@ -34,7 +34,7 @@ feature-rich server that takes your network capabilities to the next level.
 
 ## 🚀 Getting Started
 
-1. Clone:    `git clone https://github.com/yourusername/lunasocks.git`
+1. Clone:    `git clone https://github.com/sioaeko/lunasocks.git`
 2. Install:  `cd lunasocks && go mod tidy`
 3. Launch:   `go run main.go`
 

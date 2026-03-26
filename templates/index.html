@@ -7,50 +7,226 @@
     <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
     <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 { color: #333; }
-        .config { background: #f4f4f4; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
-        input { width: 100%; padding: 5px; margin-bottom: 10px; }
-        button { background: #333; color: #fff; padding: 10px; border: none; cursor: pointer; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        header h1 {
+            font-size: 2rem;
+            color: #c9a0ff;
+            margin-bottom: 8px;
+        }
+        header p {
+            color: #888;
+            font-size: 0.9rem;
+        }
+        .card {
+            background: #1a1a2e;
+            border: 1px solid #2a2a4a;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .card h2 {
+            font-size: 1.1rem;
+            color: #c9a0ff;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #2a2a4a;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: #aaa;
+            margin-bottom: 6px;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            background: #0f0f23;
+            border: 1px solid #2a2a4a;
+            border-radius: 8px;
+            color: #e0e0e0;
+            font-size: 0.95rem;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #c9a0ff;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #7c3aed;
+            color: #fff;
+        }
+        .btn-primary:hover {
+            background: #6d28d9;
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+        .status-dot.online {
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+        }
+        .status-text {
+            font-size: 0.9rem;
+        }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9rem;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s;
+            z-index: 100;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .toast.success { background: #166534; border: 1px solid #22c55e; }
+        .toast.error { background: #7f1d1d; border: 1px solid #ef4444; }
     </style>
 </head>
 <body>
     <div id="app" class="container">
-        <h1>LunaSocks Dashboard</h1>
-        
-        <div class="config">
-            <h2>Server Configuration</h2>
-            <input v-model="config.Server" placeholder="Server">
-            <input v-model="config.ServerPort" placeholder="Server Port" type="number">
-            <input v-model="config.Password" placeholder="Password" type="password">
-            <input v-model="config.Method" placeholder="Encryption Method">
-            <button @click="updateConfig">Update Configuration</button>
+        <header>
+            <h1>LunaSocks</h1>
+            <p>SOCKS5 Proxy Server Dashboard</p>
+        </header>
+
+        <div class="card">
+            <h2>Server Status</h2>
+            <div class="status-bar">
+                <div class="status-dot" :class="{ online: serverStatus.running }"></div>
+                <span class="status-text">
+                    {{ serverStatus.running ? 'Running' : 'Stopped' }}
+                    <span v-if="serverStatus.address"> &mdash; {{ serverStatus.address }}</span>
+                </span>
+            </div>
         </div>
+
+        <div class="card">
+            <h2>Configuration</h2>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Server Address</label>
+                    <input v-model="config.server_address" placeholder="0.0.0.0:1080">
+                </div>
+                <div class="form-group">
+                    <label>Encryption Method</label>
+                    <select v-model="config.method">
+                        <option value="aes-256-gcm">AES-256-GCM</option>
+                        <option value="chacha20-poly1305">ChaCha20-Poly1305</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Password</label>
+                    <input v-model="config.password" type="password" placeholder="Password">
+                </div>
+                <div class="form-group">
+                    <label>Timeout (seconds)</label>
+                    <input v-model.number="config.timeout" type="number" min="1" max="300">
+                </div>
+            </div>
+            <button class="btn btn-primary" @click="updateConfig" :disabled="saving">
+                {{ saving ? 'Saving...' : 'Update Configuration' }}
+            </button>
+        </div>
+
+        <div class="toast" :class="[toast.type, { show: toast.visible }]">{{ toast.message }}</div>
     </div>
 
     <script>
     new Vue({
         el: '#app',
         data: {
-            config: {}
+            config: {},
+            serverStatus: { running: false, address: '' },
+            saving: false,
+            toast: { visible: false, message: '', type: 'success' },
+            statusInterval: null
         },
         methods: {
             fetchConfig() {
                 axios.get('/api/config')
-                    .then(response => {
-                        this.config = response.data;
-                    })
-                    .catch(error => console.error(error));
+                    .then(response => { this.config = response.data; })
+                    .catch(() => this.showToast('Failed to load configuration', 'error'));
+            },
+            fetchStatus() {
+                axios.get('/api/server/status')
+                    .then(response => { this.serverStatus = response.data; })
+                    .catch(() => {});
             },
             updateConfig() {
+                this.saving = true;
                 axios.post('/api/config', this.config)
-                    .then(() => alert('Configuration updated successfully'))
-                    .catch(error => console.error(error));
+                    .then(() => {
+                        this.showToast('Configuration updated', 'success');
+                        this.fetchStatus();
+                    })
+                    .catch(() => this.showToast('Failed to update configuration', 'error'))
+                    .finally(() => { this.saving = false; });
+            },
+            showToast(message, type) {
+                this.toast = { visible: true, message, type };
+                setTimeout(() => { this.toast.visible = false; }, 3000);
             }
         },
         mounted() {
             this.fetchConfig();
+            this.fetchStatus();
+            this.statusInterval = setInterval(this.fetchStatus, 5000);
+        },
+        beforeDestroy() {
+            if (this.statusInterval) clearInterval(this.statusInterval);
         }
     });
     </script>

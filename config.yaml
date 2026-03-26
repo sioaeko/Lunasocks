@@ -1,0 +1,7 @@
+server_address: "0.0.0.0:1080"
+password: "your-secure-password-here"
+method: "aes-256-gcm"
+timeout: 30
+use_tls: false
+tls_cert_file: ""
+tls_key_file: ""

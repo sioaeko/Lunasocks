@@ -1,114 +1,117 @@
-
 ![Fotoram io](https://github.com/user-attachments/assets/04635a76-2e42-454f-aacb-2f7f1173c6b4)
 
-# 🌙 Lunasocks: The Next-Gen SOCKS5 Proxy Server
+# Lunasocks
 
-## 🚀 Supercharge Your Network with Lunasocks! 🚀
+A high-performance SOCKS5 proxy server written in Go with Shadowsocks protocol support, TLS encryption, and a web management interface.
 
-Lunasocks is not just another SOCKS5 proxy - it's a high-performance, 
-feature-rich server that takes your network capabilities to the next level.
+## Features
 
-## ✨ Key Features
+- **SOCKS5 Protocol** - Full SOCKS5 support with TCP and UDP relay
+- **Shadowsocks** - Encrypted proxy connections using AES-256-GCM or ChaCha20-Poly1305
+- **TLS Encryption** - Optional TLS for the control channel
+- **Plugin System** - Extensible plugin architecture for connection/data hooks
+- **Web Dashboard** - Browser-based configuration and monitoring interface
+- **Client Mode** - Built-in SOCKS5 client for connecting to Lunasocks servers
 
-- 🔒 Robust SOCKS5 protocol support with TLS encryption
-- 🛡️ Secure authentication system
-- 🧩 Extensible plugin architecture
-- 🕹️ User-friendly web management interface
+## Getting Started
 
-## 🏆 Why Choose Lunasocks?
+```bash
+git clone https://github.com/sioaeko/Lunasocks.git
+cd Lunasocks
+go mod tidy
+go build -o lunasocks .
+```
 
-1. **🚄 BLAZING FAST:** 
-   Harnesses Go's concurrency for unparalleled speed and efficiency.
+### Run the server
 
-2. **🛠️ HIGHLY EXTENSIBLE:** 
-   Customize and extend functionality with our powerful plugin system.
+```bash
+# With default config
+./lunasocks --config config.yaml
 
-3. **🔐 FORT KNOX SECURITY:** 
-   TLS support and authentication keep your connections fortress-strong.
+# With TLS and web admin
+./lunasocks --config config.yaml --tls --web-admin --web-admin-port 8080
 
-4. **🎛️ FLEXIBLE CONFIGURATION:** 
-   Easily adapt to any network environment.
+# With debug logging
+./lunasocks --config config.yaml --log-level debug
+```
 
-5. **👨‍💼 EFFORTLESS MANAGEMENT:** 
-   Intuitive web interface for smooth server administration.
+## Configuration
 
-## 🚀 Getting Started
+Edit `config.yaml`:
 
-1. Clone:    `git clone https://github.com/sioaeko/lunasocks.git`
-2. Install:  `cd lunasocks && go mod tidy`
-3. Launch:   `go run main.go`
+```yaml
+server_address: "0.0.0.0:1080"
+password: "your-secure-password"
+method: "aes-256-gcm"        # or "chacha20-poly1305"
+timeout: 30                   # seconds
+use_tls: false
+tls_cert_file: ""
+tls_key_file: ""
+```
 
-## 📁 Project Structure
+## Project Structure
+
 ```
 lunasocks/
-├── cmd/
-│   └── lunasocks/
-│       └── main.go
-├── internal/
-│   ├── config/
-│   │   └── config.go
-│   ├── crypto/
-│   │   ├── cipher.go
-│   │   └── key.go
-│   ├── logging/
-│   │   └── logger.go
-│   ├── network/
-│   │   ├── server.go
-│   │   ├── tcp.go
-│   │   └── udp.go
-│   ├── protocol/
-│   │   ├── socks5.go
-│   │   └── shadowsocks.go
-│   └── socks/
-│       └── socks.go
+├── main.go                 # Entry point, CLI flags
+├── config.yaml             # Default configuration
+├── config/
+│   └── config.go           # YAML config loading & validation
+├── crypto/
+│   ├── aead.go             # AEAD cipher (AES-GCM, ChaCha20-Poly1305)
+│   ├── kdf.go              # HKDF key derivation
+│   └── crypto_test.go      # Cipher & KDF tests
+├── logging/
+│   └── logger.go           # Leveled logging (debug/info/error)
+├── network/
+│   ├── server.go           # Main server (TCP accept loop, auth, plugins)
+│   ├── tcp.go              # Shadowsocks TCP server
+│   └── udp.go              # Encrypted UDP relay
+├── protocol/
+│   ├── socks5.go           # SOCKS5 handshake & request parsing
+│   └── shadowsocks.go      # Shadowsocks connection handler
+├── socks/
+│   ├── socks.go            # SOCKS address parsing utilities
+│   └── socks_test.go       # Address parsing tests
+├── plugin/
+│   └── plugin.go           # Plugin interface & LoggingPlugin
+├── client/
+│   └── client.go           # SOCKS5 client with encryption
+├── web/
+│   └── server.go           # Web dashboard API server
 ├── pkg/
-│   └── utils/
-│       └── pool.go
-├── config.yaml
-├── go.mod
-├── go.sum
-└── README.md
+│   └── pool/
+│       └── pool.go         # sync.Pool-based buffer pool
+└── templates/
+    └── index.html          # Web dashboard UI
 ```
 
+## Plugin System
 
-## 🔧 Configuration Made Easy
-
-Edit `config.yaml` to tailor Lunasocks to your needs:
-- `ServerAddress`: Your SOCKS5 server's home
-- `Password`: Keep intruders out
-- `UseTLS`: Encrypt like a pro
-- `TLSCertFile` & `TLSKeyFile`: Your security credentials
-
-## 💡 Extend with Plugins
-
-Create powerful plugins with just a few lines of code!
+Create plugins by implementing the `Plugin` interface:
 
 ```go
-type LoggingPlugin struct{}
-
-func (p *LoggingPlugin) OnConnect(conn net.Conn) {
-    log.Printf("New SOCKS5 connection from %s", conn.RemoteAddr())
-}
-
-func (p *LoggingPlugin) OnData(data []byte) []byte {
-    log.Printf("Proxying data: %d bytes", len(data))
-    return data
+type Plugin interface {
+    Name() string
+    OnConnect(conn net.Conn)
+    OnData(data []byte) []byte
 }
 ```
 
-## 🌐 Web Management at Your Fingertips:
+Register plugins before starting the server:
 
-Access your control center at port 8080:
-  • Adjust configurations on the fly
-  • Monitor your proxy's pulse
-  • Track connection stats with ease
+```go
+server.AddPlugin(&plugin.LoggingPlugin{})
+```
 
-## 🤝 Join the Lunasocks Revolution:
-We welcome your contributions! Send us a Pull Request and help shape the future of proxy servers.
+## Web Management
 
-## 📜 License:
-Lunasocks is proudly distributed under the MIT License.
+Start with `--web-admin` to access the dashboard at `http://localhost:8080`:
 
------------------------------------------
-Elevate your network experience with Lunasocks - 
-Where speed meets security, and simplicity embraces power!
+- View server status (running/stopped)
+- Update configuration (address, password, encryption method, timeout)
+- Auto-refreshing status indicator
+
+## License
+
+MIT License
